@@ -67,9 +67,8 @@ class vector_db_index:
 
     Members:    
     engine (int): Vector Store engine
-    0: JSON
-    1: ChromaDB
-    2: Milvus
+    0: ChromaDB
+    1: Milvus
 
     name (str): index or collection name
     """

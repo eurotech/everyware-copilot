@@ -1,22 +1,14 @@
-#import ollama
-#import openai
 import streamlit as st
 import pandas as pd
-import chromadb
 
-from llama_index.core import VectorStoreIndex, Settings, SimpleDirectoryReader
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.readers.web import SimpleWebPageReader
-from llama_index.readers.file import PyMuPDFReader
-from llama_index.readers.web import WholeSiteReader
+from langchain_community.embeddings import GPT4AllEmbeddings 
+from langchain_community.document_loaders.directory import DirectoryLoader 
+from langchain_community.document_loaders import PyPDFLoader 
+from langchain_text_splitters import RecursiveCharacterTextSplitter 
+from langchain_community.document_loaders import WebBaseLoader 
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.vector_stores.milvus import MilvusVectorStore
-from llama_index.core import StorageContext
+from langchain_chroma.vectorstores import Chroma
+from langchain_milvus.vectorstores import Milvus
 
 from PIL import Image
 import time
@@ -25,7 +17,6 @@ import os
 import logging
 import sys
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-# logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
@@ -34,19 +25,19 @@ import utils.constants as const
 
 ETH_LOGO = Image.open('./images/logo.png')
 ECP_LOGO = Image.open('./images/ecp_logo.png')
-
+    
 def on_settings_change():
     logging.info(" --- settings updated ---")
 
 def on_local_model_change():
-    Settings.embed_model = HuggingFaceEmbedding(model_name="WhereIsAI/UAE-Large-V1", trust_remote_code=True)
-    logging.info(f" --- Settings.embed_model=HuggingFaceEmbedding(model_name=WhereIsAI/UAE-Large-V1) ---")
+    st.session_state.embed_model = GPT4AllEmbeddings(model_name="all-MiniLM-L6-v2.gguf2.f16.gguf", gpt4all_kwargs={'allow_download': 'True'})
+    logging.info(f" --- st.session_state.embed_model=GPT4AllEmbeddings(model_name='all-MiniLM-L6-v2.gguf2.f16.gguf', gpt4all_kwargs={'allow_download': 'True'}) ---")
 
 def on_indexname_change():
     name = st.session_state.my_indexname
     vector_engine = st.session_state.vector_db
     name = utils.func.make_valid_directory_name(name)
-    if os.path.exists(os.path.join(const.INDEX_ROOT_PATH, name)) and (vector_engine != 1):
+    if os.path.exists(os.path.join(const.INDEX_ROOT_PATH, name)) and (vector_engine != 0):
         with container_name:
             st.error('The title name is not valid', icon="🚨")
     else:
@@ -54,10 +45,8 @@ def on_indexname_change():
         st.session_state.index_name = f"{name}"
         with container_name:
             if vector_engine == 0:
-                st.markdown(f"`{st.session_state.index_path_to_be_created}` will be created")
-            if vector_engine == 1:
                 st.markdown(f"Collection `{st.session_state.index_name}` will be created inside ChromaDB")
-            if vector_engine == 2:
+            if vector_engine == 1:
                 st.markdown(f"`{st.session_state.index_path_to_be_created}.mvdb` will be created")
 
 def on_docspath_change():
@@ -109,113 +98,101 @@ def check_if_ready_to_index():
         st.session_state.index_button_disabled = False
 
 def get_vector_engine_name():
-    if st.session_state.vector_db == 1:
+    if st.session_state.vector_db == 0:
         return "ChromaDB"
-    if st.session_state.vector_db == 2:
+    else:
         return "Milvus"
-    return "JSON"
 
 def create_index(docs):
-    if st.session_state.vector_db == 1:
+    if(('chunk_size' not in st.session_state) or ('chunk_overlap' not in st.session_state)):
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=20)
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=st.session_state.chunk_size, chunk_overlap=st.session_state.chunk_overlap)
+    documents = text_splitter.split_documents(docs)
+
+    if st.session_state.vector_db == 0:
         logging.info("### Creating ChromaDB Index...")
-        db = chromadb.PersistentClient(path="./chromadb")
-        chroma_collection = db.get_or_create_collection(st.session_state.index_name)
-        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        index = VectorStoreIndex.from_documents(
-            docs, 
-            storage_context=storage_context
+        vector_store = Chroma(
+            embedding_function=st.session_state.embed_model,
+            persist_directory="./chromadb",
+            collection_name=st.session_state.index_name,
         )
-        return index
-    if st.session_state.vector_db == 2:
-        logging.info("### Creating Milvus Index...")
-        vector_store = MilvusVectorStore(st.session_state.index_path_to_be_created+".mvdb", dim=1024)
-        storage_context = StorageContext.from_defaults(vector_store= vector_store)
-        index = VectorStoreIndex.from_documents(
-            docs, 
-            storage_context=storage_context
-        )
-        return index
+        
+        vector_store.add_documents(documents=documents)
 
-    logging.info("### Creating Simple JSON Index...")
-    return VectorStoreIndex.from_documents(docs)
-
-def persist_index(index):
+        return vector_store
     if st.session_state.vector_db == 1:
-        # ChromaDB
-        # should store automatically
-        return
-    if st.session_state.vector_db == 2:
-        # Milvus
-        # should store automatically
-        return
-    
-    # JSON
-    index.storage_context.persist(persist_dir=st.session_state.index_path_to_be_created)
+        logging.info("### Creating Milvus Index...")
+        vector_store = Milvus(
+            embedding_function=st.session_state.embed_model,
+            auto_id=True,
+            connection_args={
+                "uri": st.session_state.index_path_to_be_created+".db",
+            },
+        )
+        vector_store.add_documents(documents=documents, embedding=st.session_state.embed_model)
+        return vector_store
 
 
 # App title
 st.set_page_config(page_title="everyware copilot - Build Index", menu_items=None)
-Settings.embed_model = HuggingFaceEmbedding(model_name="WhereIsAI/UAE-Large-V1", trust_remote_code=True)
+st.session_state.embed_model = GPT4AllEmbeddings(model_name="all-MiniLM-L6-v2.gguf2.f16.gguf", gpt4all_kwargs={'allow_download': 'True'})
 
 ### Building Index with Embedding Model
 def index_data():
     with container_status:
         start_time = time.time()
         with st.status("Indexing documents..."):
-            logging.info(f"Setting Embedding model... {Settings.embed_model}")
+            logging.info(f"Setting Embedding model... {st.session_state.embed_model}")
             logging.info(f"Setting Vecor DB Engine... {get_vector_engine_name()}")
-            docs = []
-            web_docs = []
+            all_docs = []
             if st.session_state.num_of_files_to_read != 0:
-                reader = SimpleDirectoryReader(
-                    input_dir=st.session_state.docspath, 
+                reader = DirectoryLoader(
+                    path=st.session_state.docspath, 
                     recursive=True,
-                    file_extractor={".pdf": PyMuPDFReader()}
+                    loader_cls=PyPDFLoader,
                     )
                 st.write(    "Loading local documents...")
                 logging.info("Loading local documents...")
-                docs = reader.load_data()
+                docs = reader.load()
                 st.write(    f"{len(docs)} local documents loaded.")
                 logging.info(f"{len(docs)} local documents loaded.")
                 st.write(    "Building Index from local docs (using GPU)...")
                 logging.info("Building Index from local docs (using GPU)...")
 
-                index = create_index(docs)
+                all_docs.extend(docs)
             if st.session_state.num_of_urls_to_read != 0:
                 st.write(    "Loading web documents...")
                 logging.info("Loading web documents...")
 
-                options = Options()
-                options.add_argument('--headless')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                options.add_argument('--remote-debugging-pipe')
-                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
                 for url in st.session_state.urllist:
                     st.write(    f"Loading web documents from {url}...")
-
-                    scraper = WholeSiteReader(
-                        prefix=url,
-                        max_depth=st.session_state.web_crawling_depth,
-                        driver=driver
-                    )
-                    web_docs=(scraper.load_data(base_url=url))
-                    # web_docs = SimpleWebPageReader(html_to_text=True).load_data(st.session_state.urllist)
+                    #scraper = SitemapLoader(
+                    #    web_path=url,
+                    #    max_depth=st.session_state.web_crawling_depth,
+                    #)
+                    #web_docs=scraper.load()
+                    loader = WebBaseLoader(web_path = url)
+                    web_docs = (loader.load())
                     st.write(    f"{len(web_docs)} web documents loaded from {url}.")
                     logging.info(f"{len(web_docs)} web documents loaded from {url}.")
                     logging.info(f"len(web_docs): {len(web_docs)}")
-                    st.write(    "Building Index from web docs (using GPU)...")
-                    logging.info("Building Index from web docs (using GPU)...")
-                    if 'index' not in locals():
-                        index = create_index(web_docs)
-                    else:
-                        for d in web_docs:
-                            index.insert(document = d)
+                    all_docs.extend(web_docs)
+
+                #else:
+                    #if st.session_state.vector_db == 0:
+                    #    for d in web_docs:
+                    #        index.add_documents(documents=d)
+                    #else:
+                    #    for d in web_docs:
+                    #        index.upsert(documents=d)
+
+            st.write(    "Building Index from web docs (using GPU)...")
+            logging.info("Building Index from web docs (using GPU)...")
+            index = create_index(all_docs)
+
             st.write(    "Saving the built index to disk...")
             logging.info("Saving the built index to disk...")
-            persist_index(index)
             st.write(    "Indexing done!")
             logging.info("Indexing done!")
         end_time = time.time()
@@ -224,7 +201,7 @@ def index_data():
     total_size_mib = utils.func.get_total_size_mib(st.session_state.index_path_to_be_created)
 
     md = f"""
-    Index named **"{st.session_state.index_name}"** was built from **`{len(docs)}` local** documents and **`{len(web_docs)}` online** documents!
+    Index named **"{st.session_state.index_name}"** was built from `{len(all_docs)}` documents!
 
     The index is saved under `{st.session_state.index_path_to_be_created}` and the total size of this index is **`{total_size_mib:.2f}`** MiB. 
 
@@ -246,31 +223,23 @@ with st.sidebar:
     st.info('Build your own custom Index based on your local/online documents.')
 
     st.subheader("Embedding Model")
-    t1,t2 = st.tabs(['Local','OpenAI'])    
+    t1 = st.tabs(['Local'])[0]
     with t1:
-        #models = [model["name"] for model in ollama.list()["models"]]
-        models = ["WhereIsAI/UAE-Large-V1"]
-        st.selectbox("Choose local embedding model", models, index=models.index("WhereIsAI/UAE-Large-V1"), key='my_local_model', on_change=on_local_model_change)
-    with t2:
-        # openai.api_key = st.text_input("OpenAI API Key", key="chatbot_api_key", type="password")
-        # os.environ["OPENAI_API_KEY"] = openai.api_key
-        # logging.info(f"> openai.api_key = {openai.api_key}")
-        st.selectbox("Choose OpenAI embedding model", ["-- Choose from below --", "text-embedding-3-large", "text-embedding-3-small", "text-embedding-ada-002"], index=0, key='my_openai_model')
+        models = ["all-MiniLM-L6-v2.gguf2.f16.gguf"]
+        st.selectbox("Predefined local embeddign model", models, index=models.index("all-MiniLM-L6-v2.gguf2.f16.gguf"), key='my_local_model', on_change=on_local_model_change)
     
-    v_idx = st.radio("Choose your preferred Vector Database", ["JSON","ChromaDB", "Milvus"], index=st.session_state.vector_db)
-    if v_idx == "JSON":
+    v_idx = st.radio("Choose your preferred Vector Database", ["ChromaDB", "Milvus"], index=st.session_state.vector_db)
+    if v_idx == "ChromaDB":
         st.session_state.vector_db = 0
-    elif v_idx == "ChromaDB":
-        st.session_state.vector_db = 1
     elif v_idx == "Milvus":
-        st.session_state.vector_db = 2
+        st.session_state.vector_db = 1
 
     use_customized_chunk = st.toggle("Customize chunk parameters", value=False)
     if use_customized_chunk:
-        Settings.chunk_size = st.slider("Chunk size", 100, 5000, 512, key='my_chunk_size', on_change=on_settings_change)
-        Settings.chunk_overlap = st.slider("Chunk overlap", 10, 500, 24, key='my_chunk_overlap', on_change=on_settings_change)
-        logging.info(f"> Settings.chunk_size    = {Settings.chunk_size}")
-        logging.info(f"> Settings.chunk_overlap = {Settings.chunk_overlap}")
+        st.session_state.chunk_size = st.slider("Chunk size", 100, 2000, 512, key='my_chunk_size', on_change=on_settings_change)
+        st.session_state.chunk_overlap = st.slider("Chunk overlap", 10, 400, 20, key='my_chunk_overlap', on_change=on_settings_change)
+        logging.info(f"> Setting hunk_size    = {st.session_state.chunk_size}")
+        logging.info(f"> Setting chunk_overlap = {st.session_state.chunk_overlap}")
 
     use_customized_web_crawler = st.toggle("Customize web crawling parameters", value=False)
     if use_customized_web_crawler:
@@ -286,6 +255,7 @@ container_name = st.container()
 
 st.subheader('Local documents')
 subdirs = utils.func.get_subdirectories(const.DOC_ROOT_PATH)
+subdirs.insert(0, "")
 st.selectbox("Select the path to the local directory used to store your documents", subdirs, key='docspath', on_change=on_docspath_change)
 container_docs = st.container()
 if len(subdirs) != 0:
@@ -302,7 +272,7 @@ st.warning("Check the model and its configurations on the sidebar (⬅️) and t
 container_settings = st.container()
 
 check_if_ready_to_index()
-logging.info(f"Setting Embedding model... {Settings.embed_model}")
+logging.info(f"Setting Embedding model... {st.session_state.embed_model}")
 
 st.button("Build Index", on_click=index_data, key='my_button', disabled=st.session_state.get("index_button_disabled", True))
 container_status = st.container()

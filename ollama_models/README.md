@@ -1,1 +1,0 @@
-`ollama_models` directories is for the ollama server in the container to store models.
