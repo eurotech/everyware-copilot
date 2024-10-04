@@ -158,16 +158,16 @@ with st.sidebar:
     if engine == "Ollama":
         models = [[model["name"], ""] for model in ollama.list()["models"]]
         check_list = [model[0] for model in models]
-        if 'llama3:latest' not in check_list:
-            with st.spinner('Downloaing llama3 model ...'):
-                ollama.pull('llama3')
-                logging.info(" ### Downloaing llama3 completed.")
+        if 'llama3.1:latest' not in check_list:
+            with st.spinner('Downloaing llama3.1 model ...'):
+                ollama.pull('llama3.1')
+                logging.info(" ### Downloaing llama3.1 completed.")
 
         if 'mxbai-embed-large:latest' not in check_list:
             with st.spinner('Downloaing mxbai-embed-large model ...'):
                 ollama.pull('mxbai-embed-large')
                 logging.info(" ### Downloaing mxbai-embed-large completed.")
-        st.session_state["model"] = st.selectbox("Choose your LLM", models, format_func=format_model_name, index=models.index(['llama3:latest', '']))
+        st.session_state["model"] = st.selectbox("Choose your LLM", models, format_func=format_model_name, index=models.index(['llama3.1:latest', '']))
         logging.info(f"> Ollama model = {st.session_state.model}")
         st.page_link("pages/download_model.py", label=" Download a new LLM", icon="➕")
         Settings.llm = Ollama(model=st.session_state["model"][0], request_timeout=300.0)        
